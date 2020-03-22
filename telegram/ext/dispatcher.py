@@ -124,6 +124,7 @@ class Dispatcher(object):
         self.user_data = defaultdict(dict)
         self.chat_data = defaultdict(dict)
         self.bot_data = {}
+        self.callback_data = bot.callback_data
         if persistence:
             if not isinstance(persistence, BasePersistence):
                 raise TypeError("persistence should be based on telegram.ext.BasePersistence")
@@ -140,6 +141,11 @@ class Dispatcher(object):
                 self.bot_data = self.persistence.get_bot_data()
                 if not isinstance(self.bot_data, dict):
                     raise ValueError("bot_data must be of type dict")
+            if self.persistence.store_callback_data:
+                self.callback_data = self.persistence.get_callback_data()
+                if not isinstance(self.callback_data, dict):
+                    raise ValueError("callback_data must be of type dict")
+                self.bot.callback_data = self.callback_data
         else:
             self.persistence = None
 
@@ -343,6 +349,17 @@ class Dispatcher(object):
                                       'uncaught error was raised while handling ' \
                                       'the error with an error_handler'
                             self.logger.exception(message)
+                if self.persistence.store_callback_data:
+                    try:
+                        self.persistence.update_callback_data(self.callback_data)
+                    except Exception as e:
+                        try:
+                            self.dispatch_error(update, e)
+                        except Exception:
+                            message = 'Saving callback data raised an error and an ' \
+                                      'uncaught error was raised while handling ' \
+                                      'the error with an error_handler'
+                            self.logger.exception(message)
                 if self.persistence.store_chat_data and update.effective_chat:
                     chat_id = update.effective_chat.id
                     try:
@@ -477,6 +494,8 @@ class Dispatcher(object):
         if self.persistence:
             if self.persistence.store_bot_data:
                 self.persistence.update_bot_data(self.bot_data)
+            if self.persistence.store_callback_data:
+                self.persistence.update_callback_data(self.callback_data)
             if self.persistence.store_chat_data:
                 for chat_id in self.chat_data:
                     self.persistence.update_chat_data(chat_id, self.chat_data[chat_id])

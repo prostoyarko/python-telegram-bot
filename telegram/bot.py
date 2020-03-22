@@ -39,9 +39,9 @@ from future.utils import string_types
 from telegram import (User, Message, Update, Chat, ChatMember, UserProfilePhotos, File,
                       ReplyMarkup, TelegramObject, WebhookInfo, GameHighScore, StickerSet,
                       PhotoSize, Audio, Document, Sticker, Video, Animation, Voice, VideoNote,
-                      Location, Venue, Contact, InputFile, Poll)
-from telegram.error import InvalidToken, TelegramError
-from telegram.utils.helpers import to_timestamp, DEFAULT_NONE
+                      Location, Venue, Contact, InputFile, Poll, InlineKeyboardMarkup)
+from telegram.error import InvalidToken, TelegramError, InvalidCallbackData
+from telegram.utils.helpers import to_timestamp, DEFAULT_NONE, sign_callback_data
 from telegram.utils.request import Request
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
@@ -85,6 +85,9 @@ class Bot(TelegramObject):
         private_key_password (:obj:`bytes`, optional): Password for above private key.
         defaults (:class:`telegram.ext.Defaults`, optional): An object containing default values to
             be used if not set explicitly in the bot methods.
+        validate_callback_data (:obj:`bool`, optional): Whether the callback data of
+            :class:`telegram.CallbackQuery` updates recieved by this bot should be validated. For
+            more info, please see our wiki. Defaults to :obj:`True`.
 
     """
 
@@ -126,11 +129,16 @@ class Bot(TelegramObject):
                  request=None,
                  private_key=None,
                  private_key_password=None,
-                 defaults=None):
+                 defaults=None,
+                 validate_callback_data=True):
         self.token = self._validate_token(token)
 
         # Gather default
         self.defaults = defaults
+
+        # Dictionary for callback_data
+        self.callback_data = {}
+        self.validate_callback_data = validate_callback_data
 
         if base_url is None:
             base_url = 'https://api.telegram.org/bot'
@@ -151,6 +159,15 @@ class Bot(TelegramObject):
 
     def _message(self, url, data, reply_to_message_id=None, disable_notification=None,
                  reply_markup=None, timeout=None, **kwargs):
+        def _replace_callback_data(reply_markup, chat_id):
+            if isinstance(reply_markup, InlineKeyboardMarkup):
+                for button in [b for l in reply_markup.inline_keyboard for b in l]:
+                    if button.callback_data:
+                        self.callback_data[str(id(button.callback_data))] = button.callback_data
+                        button.callback_data = sign_callback_data(chat_id,
+                                                                  str(id(button.callback_data)),
+                                                                  self)
+
         if reply_to_message_id is not None:
             data['reply_to_message_id'] = reply_to_message_id
 
@@ -159,6 +176,8 @@ class Bot(TelegramObject):
 
         if reply_markup is not None:
             if isinstance(reply_markup, ReplyMarkup):
+                # Replace callback data by their signed id
+                _replace_callback_data(reply_markup, data['chat_id'])
                 data['reply_markup'] = reply_markup.to_json()
             else:
                 data['reply_markup'] = reply_markup
@@ -2046,9 +2065,12 @@ class Bot(TelegramObject):
             2. In order to avoid getting duplicate updates, recalculate offset after each
                server response.
             3. To take full advantage of this library take a look at :class:`telegram.ext.Updater`
+            4. The renutred list may contain :class:`telegram.error.InvalidCallbackData` instances.
+               Make sure to ignore the corresponding update id. For more information, please see
+               our wiki.
 
         Returns:
-            List[:class:`telegram.Update`]
+            List[:class:`telegram.Update` | :class:`telegram.error.InvalidCallbackData`]
 
         Raises:
             :class:`telegram.TelegramError`
@@ -2082,7 +2104,15 @@ class Bot(TelegramObject):
             for u in result:
                 u['default_quote'] = self.defaults.quote
 
-        return [Update.de_json(u, self) for u in result]
+        updates = []
+        for u in result:
+            try:
+                updates.append(Update.de_json(u, self))
+            except InvalidCallbackData as e:
+                e.update_id = int(u['update_id'])
+                self.logger.warning('{} Malicious update: {}'.format(e, u))
+                updates.append(e)
+        return updates
 
     @log
     def set_webhook(self,
